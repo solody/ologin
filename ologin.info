@@ -1,0 +1,3 @@
+name = oLogin
+description = All-in-one third party accounts login solution.
+core = 7.x

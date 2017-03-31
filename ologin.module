@@ -1,0 +1,298 @@
+<?php
+/**
+ * @file Main file for oLogin module.
+ */
+ 
+/**
+ * Implement hook_menu().
+ */
+function ologin_menu() {
+
+  $items = array();
+  
+  // Wechat QR login.
+  $items['ologin/weixin'] = array(
+    'title' => 'Wechat login',
+    'page callback' => 'ologin_weixin_page',
+    'page arguments' => array('qr'),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  
+  // Wechat login callback.
+  $items['ologin/weixin/callback'] = array(
+    'title' => 'Wechat login',
+    'page callback' => 'ologin_weixin_callback_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,  
+  );
+  
+  // Configure page.
+  $items['admin/config/system/ologin'] = array(
+    'title' => 'oLogin',
+    'page callback' => 'ologin_config_page',
+    'access callback' => 'user_access',
+    'access arguments' => array('administer ologin'),
+  );
+  
+  return $items;
+}
+
+
+/**
+ * Implement hook_user_delete().
+ */
+function ologin_user_delete($account) {
+  db_delete('ologin')
+    ->condition('uid', $account->uid)
+    ->execute();
+}
+
+
+/**
+ * Get Weixin auth url.
+ */
+function ologin_get_weixin_auth_url ($type = null) {
+  
+  if ($type == 'qr') {
+    // @see https://open.weixin.qq.com/cgi-bin/showdocument?action=dir_list&t=resource/res_list&verify=1&id=open1419316505&token=cff71774ff7450fbcdc6f57b95307970c2702025&lang=zh_CN
+    $url = url('https://open.weixin.qq.com/connect/qrconnect', array('query' => array(
+              'appid'         => variable_get('ologin_weixin_appkey', ''),
+              'redirect_uri'  => variable_get('ologin_weixin_callback', ''),
+              'response_type' => 'code',
+              'scope'         => 'snsapi_login',
+            )));
+  }
+  
+  return $url;
+}
+
+
+/**
+ * Log callback error.
+ */
+function ologin_error($error_code = 0, $error = '', $function = NULL) {
+
+  $message = 'Error in function @function, error code: @error_code, error message: @error';
+  $vars = array(
+    '@function'   => $function . '()',
+    '@error_code' => $error_code,
+    '@error'      => $error,
+  );
+  watchdog('oLogin', $message, $vars, WATCHDOG_ERROR);
+  
+}
+
+
+/**
+ * oLogin Weixin auth page.
+ */
+function ologin_weixin_page($type = null) {
+  $url = ologin_get_weixin_auth_url('qr');
+  drupal_goto($url);
+}
+
+
+/**
+ * oLogin Weixin callback page.
+ */
+function ologin_weixin_callback_page($type = 'qr') {
+
+  $output = '';
+
+  $code = $_GET['code'];
+  
+  $appid  = variable_get('ologin_weixin_appkey', '');
+  $secret = variable_get('ologin_weixin_appsecret', '');
+  
+  $path = url('https://api.weixin.qq.com/sns/oauth2/access_token', array('query' => array(
+          'appid'         => $appid,
+          'secret'        => $secret,
+          'grant_type'    => 'authorization_code',
+          'code'          => $code,
+        )));
+        
+  // Get Access Token 
+  $options = array('method' => 'POST');
+  $request = drupal_http_request($path, $options);
+  $data = drupal_json_decode($request->data);
+
+  // Error handle.
+  if (isset($data['errcode'])) {
+    return $data['errcode'] . '<br />' . $data['errmsg'];
+  }
+
+  // Login.
+  if (isset($data['unionid']) || isset($data['openid'])) {
+    $ouid = isset($data['unionid']) ? $data['unionid'] : $data['openid'];    
+    ologin_login($ouid, 'weixin', $data);
+  }
+  
+  return $output;
+}
+
+
+/**
+ * oLogin login.
+ */
+function ologin_login($ouid, $type, $data = array()) {
+  // Check bind.
+  $query = "SELECT uid FROM {ologin} WHERE type = :type AND ouid = :ouid";
+  $result = db_query($query, array(':type' => $type, ':ouid' => $ouid));
+  $exist = (boolean)$result->rowCount();
+
+  /**
+   * Login by external user id.
+   * Log in a binded drupal user, or login a new register drupal user.  
+   */
+  if ($exist) {
+    // Login a binded Drupal user.
+    $uid = $result->fetchColumn(0);
+  }
+  else {
+    // Create a new user.
+    $name = $ouid;
+    
+    // @see https://api.drupal.org/api/drupal/modules%21user%21user.module/function/user_external_login_register/7
+    $userinfo = array(
+      'name' => $name . time(),
+      'pass' => user_password(),
+      'init' => $type . '_' . $name,
+      'status' => 1,
+      'access' => REQUEST_TIME,
+    );
+    // Save a new user.
+    $account = user_save(drupal_anonymous_user(), $userinfo);
+    
+    // Terminate if an error occurred during user_save().
+    if (!$account) {
+      drupal_set_message(t("Error saving user account."), 'error');
+      return;
+    }
+    
+    // Get and Set drupal username, format as u[uid]
+    $name = ologin_get_unique_username('u' . $account->uid);
+    $account->name = $name;
+    user_save($account);
+    
+    // Get new account uid and add ologin record.
+    $uid = $account->uid;    
+    ologin_set_record($uid, $type, $ouid);
+  }
+
+  // Check user account if is blocked.
+  // @see user_login_default_validators
+  $is_blocked = db_select('users')
+    ->fields('users', array('uid'))
+    ->condition('uid', $uid)
+    ->condition('status', 0)
+    ->execute()->fetchObject();
+
+  if ($is_blocked) {
+    drupal_set_message('This account is not activated or has been blocked, ' . l(t('Back'), '<front>'), 'error');
+  }
+  else {
+    // Load user object and process login action.
+    // @see user_external_login_register
+    // @see user_login_submit
+    global $user;
+    $user = user_load($uid);
+    $form_state['uid'] = $uid;
+    user_login_finalize($form_state);
+    //drupal_goto('user/' . $uid);
+    drupal_goto('<front>');
+  }
+}
+
+
+/**
+ * Generate unique username.
+ */
+function ologin_get_unique_username($seed_name, $name = NULL, $i = 1) {
+
+  // Set $seed_name as default name.
+  if (empty($name)) {
+    $name = $seed_name;
+  }
+
+  // Check username.
+  if (ologin_username_exist($name)) {
+    // Add suffix if username exists.
+    $name = $seed_name . '_' . $i;
+    $i++;
+    // Continue check if new name exists.
+    $name = ologin_get_unique_username($seed_name, $name, $i);
+  }
+  
+  // Return non-exists username.
+  return $name;
+}
+
+
+/**
+ * Check if a username exists.
+ */
+function ologin_username_exist($name) {
+  $query = 'SELECT uid FROM {users} WHERE name = :name';
+  $result = db_query($query, array(':name' => $name));
+  return $result->rowCount() > 0 ? TRUE : FALSE;
+}
+
+
+/**
+ * Add new oLogin record.
+ */
+function ologin_set_record($uid, $type, $name, $data = NULL) {
+            
+  $query = db_insert('ologin')
+            ->fields(array(
+              'uid' => $uid,
+              'type' => $type,
+              'ouid' => $name,
+            ))
+            ->execute();
+}
+
+
+
+/**
+ * oLogin configure page.
+ */
+function ologin_config_page () {
+  
+  $form = drupal_get_form('ologin_config_form');
+  $form_output = drupal_render($form);
+  
+  return $form_output;
+}
+
+
+function ologin_config_form() {
+  $form = array();
+
+  // Weixin QR Connect
+  $form['ologin_weixin'] = array(
+    '#type'  => 'fieldset',
+    '#title' => t('Wechat login'),
+    '#collapsible' => TRUE, 
+  );
+  
+  $form['ologin_weixin']['ologin_weixin_callback'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Wechat Callback URL'),
+    '#default_value' => variable_get('ologin_weixin_callback', ''),
+  );
+  $form['ologin_weixin']['ologin_weixin_appkey'] = array(
+    '#type' => 'textfield',
+    '#title' => t('AppKey'),
+    '#default_value' => variable_get('ologin_weixin_appkey', ''),
+  );
+  $form['ologin_weixin']['ologin_weixin_appsecret'] = array(
+    '#type' => 'textfield',
+    '#title' => t('AppSecret'),
+    '#default_value' => variable_get('ologin_weixin_appsecret', ''),
+  );
+  
+  return system_settings_form($form);
+}
+
