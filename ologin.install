@@ -1,14 +1,16 @@
 <?php
 /**
- * @file Main file of oLogin module.
+ * @file
+ * Main file of oLogin module.
  */
 
+
 /**
- * Implement hook_schema().
+ * Implements hook_schema().
  */
 function ologin_schema() {
   $schema = array();
-  
+
   $schema['ologin'] = array(
     'description' => 'TODO: please describe this table!',
     'fields' => array(
@@ -43,3 +45,11 @@ function ologin_schema() {
 }
 
 
+/**
+ * Implements hook_uninstall().
+ */
+function ologin_uninstall() {
+  variable_del('ologin_weixin_callback');
+  variable_del('ologin_weixin_appkey');
+  variable_del('ologin_weixin_appsecret');
+}
