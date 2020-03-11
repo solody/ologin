@@ -28,6 +28,14 @@ function ologin_menu() {
     'type' => MENU_CALLBACK,
   );
 
+  // 新增一个页面，用于显示邮件地址输入表单
+  $items['ologin/weixin/bind-mail'] = array(
+    'title' => 'Wechat login',
+    'page callback' => 'ologin_mail_bind_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
   // Configure page.
   $items['admin/config/system/ologin'] = array(
     'title' => 'oLogin',
@@ -99,87 +107,187 @@ function ologin_weixin_page($type = NULL) {
  */
 function ologin_weixin_callback_page($type = 'qr') {
 
-  $output = '';
+  // 获取 access_token
+  $access_token = ologin_get_access_token($_GET['code']);
 
-  $code = $_GET['code'];
+  if (isset($access_token['errcode'])) {
+    // 获取 access_token 失败
+    drupal_set_message($access_token['errcode'] . ': ' . $access_token['errmsg'], 'error');
+    return 'Wechat connect fails.';
+  } else {
+
+    // 获取 openid 和 昵称
+    $userinfo = ologin_get_userinfo($access_token);
+
+    if (isset($access_token['errcode'])) {
+      // 获取 openid 和 昵称 失败
+      drupal_set_message($access_token['errcode'] . ': ' . $access_token['errmsg'], 'error');
+      return 'Wechat connect fails.';
+    } else {
+
+      // 保存到数据库
+      $ologin_connection = ologin_set_record('weixin', $userinfo['openid'], $userinfo['nickname'], $userinfo['headimgurl']);
+
+      if (!empty($ologin_connection['uid'])) {
+        // 已经注册过，直接登录
+        ologin_login($ologin_connection['uid']);
+      } else {
+        // 跳到邮件地址绑定表单，绑定已有账号或创建新账号
+        drupal_goto('ologin/weixin/bind-mail', ['query' => ['connection' => $ologin_connection['id']]]);
+      }
+    }
+  }
+}
+
+/**
+ * 邮件地址绑定页面，使用 ologin_bind_email_form() 定义的表单
+ */
+function ologin_mail_bind_page() {
+  $ologin_connection = ologin_get_connection($_GET['connection']);
+  $form = drupal_get_form('ologin_bind_email_form', $ologin_connection);
+  $form_output = drupal_render($form);
+  return $form_output;
+}
+
+
+/**
+ * 用 code 换取 access_token
+ * @param $code
+ * @return array $access_token
+ */
+function ologin_get_access_token($code) {
 
   $appid  = variable_get('ologin_weixin_appkey', '');
   $secret = variable_get('ologin_weixin_appsecret', '');
 
   $path = url('https://api.weixin.qq.com/sns/oauth2/access_token', array('query' => array(
-          'appid'         => $appid,
-          'secret'        => $secret,
-          'grant_type'    => 'authorization_code',
-          'code'          => $code,
-        )));
+    'appid'         => $appid,
+    'secret'        => $secret,
+    'grant_type'    => 'authorization_code',
+    'code'          => $code,
+  )));
 
   // Get Access Token
   $options = array('method' => 'POST');
   $request = drupal_http_request($path, $options);
-  $data = drupal_json_decode($request->data);
-
-  // Error handle.
-  if (isset($data['errcode'])) {
-    return $data['errcode'] . '<br />' . $data['errmsg'];
-  }
-
-  // Login.
-  if (isset($data['unionid']) || isset($data['openid'])) {
-    $ouid = isset($data['unionid']) ? $data['unionid'] : $data['openid'];
-    ologin_login($ouid, 'weixin', $data);
-  }
-
-  return $output;
+  return drupal_json_decode($request->data);
 }
+
+/**
+ * 用 access_token 获取用户信息
+ * @param $access_token
+ * @return array $userinfo
+ */
+function ologin_get_userinfo($access_token) {
+
+  $path = url('https://api.weixin.qq.com/sns/userinfo', array('query' => array(
+    'access_token'  => $access_token['access_token'],
+    'openid'        => $access_token['openid'],
+  )));
+
+  // Get Access Token
+  $options = array('method' => 'GET');
+  $request = drupal_http_request($path, $options);
+  return drupal_json_decode($request->data);
+}
+
+
+/**
+ *  创建一个表单，使用户可以在扫码成功后，可以输入电子邮件
+ */
+function ologin_bind_email_form($form, &$form_state) {
+
+  $connection = reset($form_state['build_info']['args']);
+
+  if (!is_array($connection) && !empty($connection['uid'])) {
+    $msg = t('Error access');
+    drupal_set_message($msg, 'error');
+    $form['msg'] = array('#markup' => $msg);
+  } else {
+    $form['opicture'] = array(
+      '#markup' => '<img class="opicture" src="'.$connection['opicture'].'">'
+    );
+    $form['oname'] = array(
+      '#markup' => '<h4 class="oname">'.$connection['oname'].'</h4>'
+    );
+
+    // 输入邮件地址
+    $form['mail'] = array(
+      '#title' => t('Email address'),
+      '#type' => 'textfield',
+      '#description' => t('if you already have an account, enter email to bind with this third-part account.'),
+      '#required' => false,
+    );
+
+    $form['connection'] = array(
+      '#type' => 'hidden',
+      '#value' => $connection['id']
+    );
+
+    // Provide a submit button.
+    $form['submit'] = array(
+      '#type' => 'submit',
+      '#value' => 'Go on login',
+      '#validate' => array('ologin_bind_email_form_validate'),
+      '#submit' => array('ologin_bind_email_form_submit'),
+
+    );
+  }
+
+  return $form;
+}
+
+/**
+ * 表单验证过程，执行用户绑定或创建
+ */
+function ologin_bind_email_form_validate($form, &$form_state) {
+  $connection = ologin_get_connection($form_state['values']['connection']);
+
+  // 如果填写了邮件，查找用户，绑定到 connection
+  // 如果没有填写，创建新用户
+  $user = null;
+  $mail_input = filter_var($form_state['values']['mail'], FILTER_VALIDATE_EMAIL);
+  if ($mail_input) {
+    $user = user_load_by_mail($mail_input);
+  }
+  if (!$user) {
+    // 创建新用户
+    $userinfo = array(
+      'name' => ologin_get_unique_username($connection['oname']),
+      'pass' => user_password(),
+      'init' => $mail_input ? $mail_input : 'wechat_'.$connection['ouid'],
+      'status' => 1,
+      'access' => REQUEST_TIME,
+    );
+    // Save a new user.
+    $user = user_save(drupal_anonymous_user(), $userinfo);
+
+    // Terminate if an error occurred during user_save().
+    if (!$user) {
+      form_set_error('mail', t("Error saving user account."));
+    }
+  }
+
+  ologin_bind_drupal_user($connection['id'], $user->uid);
+  $form_state['user'] = $user;
+}
+
+/**
+ * 验证过程完成，登录用户
+ */
+function ologin_bind_email_form_submit($form, &$form_state) {
+  // 登录
+  ologin_login($form_state['user']->uid);
+}
+
+
+
 
 
 /**
  * oLogin login.
  */
-function ologin_login($ouid, $type, $data = array()) {
-  // Check bind.
-  $query = "SELECT uid FROM {ologin} WHERE type = :type AND ouid = :ouid";
-  $result = db_query($query, array(':type' => $type, ':ouid' => $ouid));
-  $exist = (boolean)$result->rowCount();
-
-  /*
-   * Login by external user id.
-   * Log in a binded drupal user, or login a new register drupal user.
-   */
-  if ($exist) {
-    // Login a binded Drupal user.
-    $uid = $result->fetchColumn(0);
-  }
-  else {
-    // Create a new user.
-    $name = $ouid;
-
-    $userinfo = array(
-      'name' => $name . time(),
-      'pass' => user_password(),
-      'init' => $type . '_' . $name,
-      'status' => 1,
-      'access' => REQUEST_TIME,
-    );
-    // Save a new user.
-    $account = user_save(drupal_anonymous_user(), $userinfo);
-
-    // Terminate if an error occurred during user_save().
-    if (!$account) {
-      drupal_set_message(t("Error saving user account."), 'error');
-      return;
-    }
-
-    // Get and Set drupal username, format as u[uid].
-    $name = ologin_get_unique_username('u' . $account->uid);
-    $account->name = $name;
-    user_save($account);
-
-    // Get new account uid and add ologin record.
-    $uid = $account->uid;
-    ologin_set_record($uid, $type, $ouid);
-  }
-
+function ologin_login($uid) {
   // Check user account if is blocked.
   $is_blocked = db_select('users')
     ->fields('users', array('uid'))
@@ -200,6 +308,7 @@ function ologin_login($ouid, $type, $data = array()) {
     drupal_goto('<front>');
   }
 }
+
 
 
 /**
@@ -237,20 +346,49 @@ function ologin_username_exist($name) {
 
 
 /**
- * Add new oLogin record.
+ * Add or update new oLogin record, then return it.
  */
-function ologin_set_record($uid, $type, $name, $data = NULL) {
+function ologin_set_record($type, $ouid, $oname, $opicture, $data = NULL) {
 
-  $query = db_insert('ologin')
-            ->fields(array(
-              'uid' => $uid,
-              'type' => $type,
-              'ouid' => $name,
-            ))
-            ->execute();
+  // Check bind.
+  $query = "SELECT * FROM {ologin} WHERE type = :type AND ouid = :ouid";
+  $result = db_query($query, array(':type' => $type, ':ouid' => $ouid));
+  $exist = (boolean)$result->rowCount();
+
+  if ($exist) {
+    db_update('ologin')
+      ->fields(array('oname' => $oname))
+      ->fields(array('opicture' => $opicture))
+      ->condition('type', $type)
+      ->condition('ouid', $ouid)
+      ->execute();
+  } else {
+    db_insert('ologin')
+      ->fields(array(
+        'type' => $type,
+        'ouid' => $ouid,
+        'oname' => $oname,
+        'opicture' => $opicture,
+      ))
+      ->execute();
+  }
+
+  $result = db_query($query, array(':type' => $type, ':ouid' => $ouid));
+  return $result->fetchAssoc();
 }
 
+function ologin_get_connection($connection_id) {
+  $query = "SELECT * FROM {ologin} WHERE id = :id";
+  $result = db_query($query, array(':id' => $connection_id));
+  return $result->fetchAssoc();
+}
 
+function ologin_bind_drupal_user($connection_id, $uid) {
+  db_update('ologin')
+    ->fields(array('uid' => $uid))
+    ->condition('id', $connection_id)
+    ->execute();
+}
 
 /**
  * oLogin configure page.
@@ -295,4 +433,3 @@ function ologin_config_form() {
 
   return system_settings_form($form);
 }
-

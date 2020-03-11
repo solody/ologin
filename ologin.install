@@ -23,7 +23,7 @@ function ologin_schema() {
       'uid' => array(
         'description' => 'User ID',
         'type' => 'int',
-        'not null' => TRUE,
+        'not null' => false,
       ),
       'type' => array(
         'description' => 'Type of thrid party account',
@@ -36,6 +36,18 @@ function ologin_schema() {
         'type' => 'varchar',
         'length' => '32',
         'not null' => TRUE,
+      ),
+      'oname' => array(
+        'description' => 'User name of thrid party account',
+        'type' => 'varchar',
+        'length' => '32',
+        'not null' => TRUE,
+      ),
+      'opicture' => array(
+        'description' => 'User picture of thrid party account',
+        'type' => 'varchar',
+        'length' => '255',
+        'not null' => false,
       ),
     ),
     'primary key' => array('id'),
