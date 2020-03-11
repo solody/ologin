@@ -249,8 +249,10 @@ function ologin_bind_email_form_validate($form, &$form_state) {
   $mail_input = filter_var($form_state['values']['mail'], FILTER_VALIDATE_EMAIL);
   if ($mail_input) {
     $user = user_load_by_mail($mail_input);
-  }
-  if (!$user) {
+    if (!$user) {
+      form_set_error('mail', t("Account not exist with ". $mail_input . "."));
+    }
+  } else {
     // 创建新用户
     $userinfo = array(
       'name' => ologin_get_unique_username($connection['oname']),
@@ -268,8 +270,10 @@ function ologin_bind_email_form_validate($form, &$form_state) {
     }
   }
 
-  ologin_bind_drupal_user($connection['id'], $user->uid);
-  $form_state['user'] = $user;
+  if ($user) {
+    ologin_bind_drupal_user($connection['id'], $user->uid);
+    $form_state['user'] = $user;
+  }
 }
 
 /**
