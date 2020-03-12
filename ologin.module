@@ -133,7 +133,7 @@ function ologin_weixin_callback_page($type = 'qr') {
         ologin_login($ologin_connection['uid']);
       } else {
         // 跳到邮件地址绑定表单，绑定已有账号或创建新账号
-        drupal_goto('ologin/weixin/bind-mail', ['query' => ['connection' => $ologin_connection['id']]]);
+        drupal_goto('ologin/weixin/bind-mail', ['query' => ['connection' => base64_encode($ologin_connection['id'])]]);
       }
     }
   }
@@ -143,7 +143,7 @@ function ologin_weixin_callback_page($type = 'qr') {
  * 邮件地址绑定页面，使用 ologin_bind_email_form() 定义的表单
  */
 function ologin_mail_bind_page() {
-  $ologin_connection = ologin_get_connection($_GET['connection']);
+  $ologin_connection = ologin_get_connection(base64_decode($_GET['connection']));
   $form = drupal_get_form('ologin_bind_email_form', $ologin_connection);
   $form_output = drupal_render($form);
   return $form_output;
@@ -328,7 +328,7 @@ function ologin_get_unique_username($seed_name, $name = NULL, $i = 1) {
   // Check username.
   if (ologin_username_exist($name)) {
     // Add suffix if username exists.
-    $name = $seed_name . '_' . $i;
+    $name = $seed_name . '_' . $i . rand(0, 9);
     $i++;
     // Continue check if new name exists.
     $name = ologin_get_unique_username($seed_name, $name, $i);
