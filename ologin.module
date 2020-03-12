@@ -133,7 +133,9 @@ function ologin_weixin_callback_page($type = 'qr') {
         ologin_login($ologin_connection['uid']);
       } else {
         // 跳到邮件地址绑定表单，绑定已有账号或创建新账号
-        drupal_goto('ologin/weixin/bind-mail', ['query' => ['connection' => base64_encode($ologin_connection['id'])]]);
+        drupal_session_start();
+        $_SESSION['wechat_connection'] = $ologin_connection['id'];
+        drupal_goto('ologin/weixin/bind-mail');
       }
     }
   }
@@ -143,10 +145,17 @@ function ologin_weixin_callback_page($type = 'qr') {
  * 邮件地址绑定页面，使用 ologin_bind_email_form() 定义的表单
  */
 function ologin_mail_bind_page() {
-  $ologin_connection = ologin_get_connection(base64_decode($_GET['connection']));
-  $form = drupal_get_form('ologin_bind_email_form', $ologin_connection);
-  $form_output = drupal_render($form);
-  return $form_output;
+  drupal_session_start();
+  $connection = isset($_SESSION['wechat_connection']) ? $_SESSION['wechat_connection'] : null;
+  $ologin_connection = ologin_get_connection($connection);
+
+  if ($ologin_connection) {
+    $form = drupal_get_form('ologin_bind_email_form', $ologin_connection);
+    $form_output = drupal_render($form);
+    return $form_output;
+  } else {
+    return 'Access error!';
+  }
 }
 
 
@@ -215,7 +224,14 @@ function ologin_bind_email_form($form, &$form_state) {
     $form['mail'] = array(
       '#title' => t('Email address'),
       '#type' => 'textfield',
-      '#description' => t('if you already have an account, enter email to bind with this third-part account.'),
+      '#description' => t('If you already have an account, enter email to bind with this third-part account.'),
+      '#required' => false,
+    );
+
+    $form['pass'] = array(
+      '#title' => t('Password'),
+      '#type' => 'password',
+      '#description' => t('Please enter your password to verify your account.'),
       '#required' => false,
     );
 
@@ -247,10 +263,22 @@ function ologin_bind_email_form_validate($form, &$form_state) {
   // 如果没有填写，创建新用户
   $user = null;
   $mail_input = filter_var($form_state['values']['mail'], FILTER_VALIDATE_EMAIL);
-  if ($mail_input) {
-    $user = user_load_by_mail($mail_input);
-    if (!$user) {
-      form_set_error('mail', t("Account not exist with ". $mail_input . "."));
+  $pass_input = $form_state['values']['pass'];
+  if (!empty($form_state['values']['mail'])) {
+
+    if ($mail_input) {
+      $user = user_load_by_mail($mail_input);
+    } else {
+      $user = user_load_by_name($form_state['values']['mail']);
+    }
+    if ($user) {
+      require_once DRUPAL_ROOT . '/' . variable_get('password_inc', 'includes/password.inc');
+      $pass = user_check_password($pass_input, $user);
+      if (!$pass) {
+        form_set_error('pass', t("Account verify fail for ". $form_state['values']['mail'] . "."));
+      }
+    } else {
+      form_set_error('mail', t("Account ". $form_state['values']['mail'] . " not register yet."));
     }
   } else {
     // 创建新用户
@@ -280,6 +308,7 @@ function ologin_bind_email_form_validate($form, &$form_state) {
  * 验证过程完成，登录用户
  */
 function ologin_bind_email_form_submit($form, &$form_state) {
+  if (isset($_SESSION['wechat_connection'])) unset($_SESSION['wechat_connection']);
   // 登录
   ologin_login($form_state['user']->uid);
 }
