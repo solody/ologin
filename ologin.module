@@ -235,12 +235,16 @@ function ologin_bind_email_form($form, &$form_state) {
       '#required' => false,
     );
 
-    $form['connection'] = array(
-      '#type' => 'hidden',
-      '#value' => $connection['id']
+    $form['register'] = array(
+      '#type' => 'link',
+      '#title' => t("I don't have an account yet"),
+      '#href' => '/user/register',
+      '#attributes' => array(
+        'target' => '_blank'
+      ),
+      '#theme_wrappers' => array('container')
     );
 
-    // Provide a submit button.
     $form['submit'] = array(
       '#type' => 'submit',
       '#value' => 'Go on login',
@@ -257,7 +261,7 @@ function ologin_bind_email_form($form, &$form_state) {
  * 表单验证过程，执行用户绑定或创建
  */
 function ologin_bind_email_form_validate($form, &$form_state) {
-  $connection = ologin_get_connection($form_state['values']['connection']);
+  $connection = ologin_get_connection($_SESSION['wechat_connection']);
 
   // 如果填写了邮件，查找用户，绑定到 connection
   // 如果没有填写，创建新用户
@@ -275,10 +279,10 @@ function ologin_bind_email_form_validate($form, &$form_state) {
       require_once DRUPAL_ROOT . '/' . variable_get('password_inc', 'includes/password.inc');
       $pass = user_check_password($pass_input, $user);
       if (!$pass) {
-        form_set_error('pass', t("Account verify fail for ". $form_state['values']['mail'] . "."));
+        form_set_error('pass', t("Account verify fail for @account.", array('account' => $form_state['values']['mail'])));
       }
     } else {
-      form_set_error('mail', t("Account ". $form_state['values']['mail'] . " not register yet."));
+      form_set_error('mail', t("Account @account not register yet.", array('account' => $form_state['values']['mail'])));
     }
   } else {
     // 创建新用户
